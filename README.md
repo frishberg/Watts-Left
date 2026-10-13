@@ -6,6 +6,8 @@
 
 **See how fast your laptop is charging or draining, live, in watts.**
 
+<img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Ffrishberg%2FWatts-Left%2Fstats%2Fdownloads.json&query=%24.total&label=downloads&color=0067C0" alt="Downloads: Microsoft Store installs plus .exe downloads">
+
 <a href="https://apps.microsoft.com/detail/9N39TLT3SXV6"><img src="docs/btn-store.svg" alt="Recommended: get it from the Microsoft Store" height="54"></a>
 &nbsp;
 <a href="../../releases"><img src="docs/btn-exe.svg" alt="Direct: download the .exe" height="54"></a>

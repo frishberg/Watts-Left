@@ -1,0 +1,49 @@
+name: Download stats
+
+on:
+  schedule:
+    - cron: "41 7 * * *"   # daily 07:41 UTC
+  workflow_dispatch:
+    inputs:
+      sign_in:
+        description: "Sign in to the Store again (a sign-in code appears in the log)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  stats:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Count downloads
+        run: |
+          mkdir out
+          python3 .github/download_stats.py > out/downloads.json
+          cat out/downloads.json
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          STORE_REFRESH_TOKEN: ${{ secrets.STORE_REFRESH_TOKEN }}
+          STORE_SIGN_IN: ${{ inputs.sign_in }}
+          NEW_REFRESH_TOKEN: ${{ runner.temp }}/store_refresh_token
+      # Each sign-in hands out a new refresh token; keep it so the sign-in never lapses.
+      - name: Save the renewed Store sign-in
+        run: |
+          f="$RUNNER_TEMP/store_refresh_token"
+          [ -s "$f" ] || exit 0
+          gh secret set STORE_REFRESH_TOKEN --repo "${{ github.repository }}" < "$f"
+          rm -f "$f"
+        env:
+          GH_TOKEN: ${{ secrets.SECRETS_PAT }}
+      # One-commit branch, replaced each run, so main never gets daily bot commits.
+      - name: Publish to the stats branch
+        working-directory: out
+        run: |
+          git init -q -b stats
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add downloads.json
+          git commit -q -m "Update download counts"
+          git push -q --force "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" stats
