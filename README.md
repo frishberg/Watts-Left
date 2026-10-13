@@ -4,7 +4,10 @@
 
 # Watt's Left
 
-<a href="https://wattsleft.app"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Ffrishberg%2FWatts-Left%2Fstats%2Fdownloads.json&query=%24.total&label=installs&color=007ec6&cacheSeconds=3600" alt="Installs: Microsoft Store installs plus .exe downloads"></a>
+<a href="../../releases/latest"><img src="https://img.shields.io/github/v/release/frishberg/Watts-Left?label=version&color=007ec6" alt="Version"></a>
+<a href="https://wattsleft.app"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Ffrishberg%2FWatts-Left%2Fstats%2Fdownloads.json&query=%24.total&label=downloads&color=007ec6&cacheSeconds=3600" alt="Downloads: Microsoft Store installs plus .exe downloads"></a>
+<a href="LICENSE"><img src="https://img.shields.io/github/license/frishberg/Watts-Left?color=67ac09" alt="License: MIT"></a>
+<a href="https://apps.microsoft.com/detail/9N39TLT3SXV6"><img src="https://img.shields.io/badge/status-stable-4b0" alt="Status: stable"></a>
 
 **See how fast your laptop is charging or draining, live, in watts.**
 
