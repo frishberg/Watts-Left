@@ -4,9 +4,9 @@
 
 # Watt's Left
 
-**See how fast your laptop is charging or draining, live, in watts.**
+<a href="https://wattsleft.app"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Ffrishberg%2FWatts-Left%2Fstats%2Fdownloads.json&query=%24.total&label=installs&color=007ec6&cacheSeconds=3600" alt="Installs: Microsoft Store installs plus .exe downloads"></a>
 
-<img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Ffrishberg%2FWatts-Left%2Fstats%2Fdownloads.json&query=%24.total&label=downloads&color=0067C0" alt="Downloads: Microsoft Store installs plus .exe downloads">
+**See how fast your laptop is charging or draining, live, in watts.**
 
 <a href="https://apps.microsoft.com/detail/9N39TLT3SXV6"><img src="docs/btn-store.svg" alt="Recommended: get it from the Microsoft Store" height="54"></a>
 &nbsp;
