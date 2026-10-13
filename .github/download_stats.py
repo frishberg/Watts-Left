@@ -91,9 +91,10 @@ def store_token():
     elif os.environ.get("STORE_REFRESH_TOKEN"):
         token = post_form(LOGIN + "/token", {
             "grant_type": "refresh_token", "client_id": CLIENT, "resource": RESOURCE,
-            "refresh_token": os.environ["STORE_REFRESH_TOKEN"]})
+            "refresh_token": os.environ["STORE_REFRESH_TOKEN"].strip()})
         if "access_token" not in token:
-            sys.exit("Store sign-in has expired; run the workflow with 'Sign in to the Store again' ticked.\n"
+            sys.exit("Store sign-in was rejected (expired, or STORE_REFRESH_TOKEN was pasted incompletely); "
+                     "run the workflow with 'Sign in to the Store again' ticked.\n"
                      + token.get("error_description", ""))
     else:
         return None
