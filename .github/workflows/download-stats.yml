@@ -17,26 +17,21 @@ jobs:
   stats:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+      # Failures are also raised as ::error annotations, which show on the run page without opening the log.
       - name: Count downloads
         run: |
           mkdir out
-          python3 .github/download_stats.py > out/downloads.json
+          python3 .github/download_stats.py > out/downloads.json 2> >(tee "$RUNNER_TEMP/stderr" >&2) || {
+            echo "::error title=Counting downloads failed::$(tail -c 600 "$RUNNER_TEMP/stderr" | tr '\n' ' ')"
+            exit 1
+          }
           cat out/downloads.json
         env:
           GITHUB_TOKEN: ${{ github.token }}
           STORE_REFRESH_TOKEN: ${{ secrets.STORE_REFRESH_TOKEN }}
           STORE_SIGN_IN: ${{ inputs.sign_in }}
           NEW_REFRESH_TOKEN: ${{ runner.temp }}/store_refresh_token
-      # Each sign-in hands out a new refresh token; keep it so the sign-in never lapses.
-      - name: Save the renewed Store sign-in
-        run: |
-          f="$RUNNER_TEMP/store_refresh_token"
-          [ -s "$f" ] || exit 0
-          gh secret set STORE_REFRESH_TOKEN --repo "${{ github.repository }}" < "$f"
-          rm -f "$f"
-        env:
-          GH_TOKEN: ${{ secrets.SECRETS_PAT }}
       # One-commit branch, replaced each run, so main never gets daily bot commits.
       - name: Publish to the stats branch
         working-directory: out
@@ -47,3 +42,15 @@ jobs:
           git add downloads.json
           git commit -q -m "Update download counts"
           git push -q --force "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" stats
+      # Each sign-in hands out a new refresh token; keep it so the sign-in never lapses.
+      # Runs after publishing, so a broken SECRETS_PAT fails the run without holding back the counts.
+      - name: Save the renewed Store sign-in
+        run: |
+          f="$RUNNER_TEMP/store_refresh_token"
+          [ -s "$f" ] || exit 0
+          gh secret set STORE_REFRESH_TOKEN --repo "${{ github.repository }}" < "$f" || {
+            echo "::error title=Saving the Store sign-in failed::SECRETS_PAT is missing, expired or deleted, or lacks 'Secrets: Read and write' on Watts-Left. Make a new token and update the SECRETS_PAT secret."
+            exit 1
+          }
+        env:
+          GH_TOKEN: ${{ secrets.SECRETS_PAT }}
