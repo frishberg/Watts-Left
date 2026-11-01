@@ -128,11 +128,26 @@ def store_installs():
     return total, dict(sorted(markets.items(), key=lambda kv: (-kv[1], kv[0])))
 
 
+def rounded(n):
+    """For the badge: rounded down, so it never claims more than was counted. 577 -> "500+", 1,140 -> "1.1k+",
+    23,900 -> "23k+". Under 100 it's the exact number."""
+    if n < 100:
+        return str(n)
+    if n < 1000:
+        return f"{n // 100 * 100}+"
+    if n < 10_000:
+        k = n // 100 / 10
+        return f"{k:g}k+"
+    return f"{n // 1000}k+"
+
+
 def main() -> int:
     github = github_downloads()
     store, markets = store_installs()
+    total = github + (store or 0)
     json.dump({
-        "total": github + (store or 0),
+        "total": total,
+        "total_label": rounded(total),
         "github": github,
         "store": store,
         # Store installs only; GitHub doesn't record where .exe downloads come from.
