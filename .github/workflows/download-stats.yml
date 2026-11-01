@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       sign_in:
-        description: "Sign in to the Store again (a sign-in code appears in the log)"
+        description: "Sign in with a device code (blocked by security defaults; use .github/store_sign_in.py on your PC instead)"
         type: boolean
         default: false
 

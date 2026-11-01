@@ -19,7 +19,8 @@ repo secret. Use a user with read-only analytics access and no admin roles
 Env vars:
   GITHUB_TOKEN          optional, lifts the GitHub API rate limit
   STORE_REFRESH_TOKEN   refresh token from the last run; without it store is null
-  STORE_SIGN_IN         "true" to sign in from scratch with a device code (shown in the log)
+  STORE_SIGN_IN         "true" to sign in from scratch with a device code (shown in the log). Blocked since
+                        October 2026 by the tenant's security defaults; sign in with .github/store_sign_in.py instead
   NEW_REFRESH_TOKEN     file to write the new refresh token to
 """
 import json
@@ -93,8 +94,8 @@ def store_token():
             "grant_type": "refresh_token", "client_id": CLIENT, "resource": RESOURCE,
             "refresh_token": os.environ["STORE_REFRESH_TOKEN"].strip()})
         if "access_token" not in token:
-            sys.exit("Store sign-in was rejected (expired, or STORE_REFRESH_TOKEN was pasted incompletely); "
-                     "run the workflow with 'Sign in to the Store again' ticked.\n"
+            sys.exit("Store sign-in was rejected (expired, revoked, or STORE_REFRESH_TOKEN was pasted incompletely); "
+                     "on your PC run 'python .github/store_sign_in.py' and paste the new token into STORE_REFRESH_TOKEN.\n"
                      + token.get("error_description", ""))
     else:
         return None
