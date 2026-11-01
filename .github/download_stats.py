@@ -106,30 +106,38 @@ def store_token():
 
 
 def store_installs():
+    """Store installs since launch, total and by market (ISO 3166 country code), or (None, None)."""
     token = store_token()
     if not token:
-        return None
+        return None, None
     url = "https://manage.devcenter.microsoft.com/v1.0/my/analytics/installs?" + urllib.parse.urlencode({
         "applicationId": STORE_ID,
         "startDate": SINCE,
         "endDate": datetime.now(timezone.utc).strftime("%m/%d/%Y"),
         "aggregationLevel": "month",
+        "groupby": "market",
     })
-    total = 0
+    markets = {}
     while url:
         page = get_json(url, {"Authorization": "Bearer " + token})
-        total += sum(row.get("successfulInstallCount", 0) for row in page.get("Value", []))
+        for row in page.get("Value", []):
+            market = row.get("market") or "Unknown"
+            markets[market] = markets.get(market, 0) + row.get("successfulInstallCount", 0)
         url = page.get("@nextLink") and urllib.parse.urljoin(url, page["@nextLink"])
-    return total
+    total = sum(markets.values())
+    return total, dict(sorted(markets.items(), key=lambda kv: (-kv[1], kv[0])))
 
 
 def main() -> int:
     github = github_downloads()
-    store = store_installs()
+    store, markets = store_installs()
     json.dump({
         "total": github + (store or 0),
         "github": github,
         "store": store,
+        # Store installs only; GitHub doesn't record where .exe downloads come from.
+        "countries": None if markets is None else sum(1 for m in markets if m != "Unknown"),
+        "store_by_country": markets,
         "updated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }, sys.stdout, indent=2)
     print()
