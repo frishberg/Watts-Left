@@ -66,6 +66,10 @@ folder on your machine, and they are removed when you uninstall. Full
 
 I have literally no idea what you're talking about. Next question.
 
+## Is it free? What's the catch?
+
+No catch. It's a hobby project I built because I needed it, and it's open source. No account, no ads, no tracking, no money. If you're like so into batteries that you need to give something to someone, please give it to the [Alzheimer's Association](https://www.alz.org/).
+
 ## License
 
 MIT. See [LICENSE](LICENSE). Made by [Aron Frishberg](https://aronfrishberg.com/).
