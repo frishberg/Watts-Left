@@ -3,7 +3,7 @@
 ;        then `ISCC.exe Store\WattsLeft.iss`  -> Store\WattsLeft-Setup.exe
 
 #define AppName "Watt's Left"
-#define AppVersion "1.2.0"
+#define AppVersion "1.2.1"
 #define Publisher "Aron Frishberg"
 #define Url "https://wattsleft.app"
 #define Src "..\bin\unpackaged\win-x64"

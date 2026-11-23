@@ -69,6 +69,20 @@ public static class Settings
         set { if (value is { } v) Set("overheadSec", v); else Remove("overheadSec"); }
     }
 
+    /// <summary>How many times plugged in this laptop's "charging" flag has been contradicted by its stored energy.</summary>
+    public static int? FlagWrongCount
+    {
+        get => Get("flagWrongCount") as int?;
+        set { if (value is { } v) Set("flagWrongCount", v); else Remove("flagWrongCount"); }
+    }
+
+    /// <summary>Caught wrong twice: plugged in, this laptop's "charging" is never shown until the stored energy confirms it.</summary>
+    public static bool FlagUnreliable
+    {
+        get => Get("flagUnreliable") is true;
+        set => Set("flagUnreliable", value);
+    }
+
     public static async Task<bool> StartsWithWindowsAsync()
     {
         if (!IsPackaged)

@@ -12,13 +12,15 @@ namespace BatteryChecker;
 
 /// <summary>
 /// Party mode. The little guy lives inside the toggle. Switch it on and he's
-/// pushed out of its left side, drops straight down onto the bar and dances
-/// on it. Switch it off and he walks back under the door, a ladder grows,
-/// he climbs up and slips back in.
+/// pushed out of its side, drops straight down onto the bar and dances on it.
+/// Switch it off and he walks back towards it, a ladder grows, he climbs to
+/// the top and dives head-first into the knob like it's a pool.
 ///
 /// You can pick him up and drop him anywhere. Over the bar he lands on it.
 /// Anywhere else he falls to the bottom of the window, walks to a spot under
 /// the bar and ladders back up. Grab him off a ladder and he falls too.
+/// The bottom of the window moves when the graphs open or close; whatever he's
+/// doing down there, he goes with it (see <see cref="EdgeWillMove"/>).
 ///
 /// One sequence runs at a time (<see cref="_sequence"/>); a grab cancels it.
 /// Limbs are storyboards on joint angles; the body moves on the compositor.
@@ -93,13 +95,18 @@ public sealed partial class MainWindow
     private void ApplyPending()
     {
         if (_pendingParty is not { } want) return;
+        if (Busy || _held) return;   // something newer took over: it keeps the wish and honours it when it finishes (StartDancing does)
         _pendingParty = null;
-        if (want != Out && !Busy && !_held) SetParty(want);
+        if (want != Out) SetParty(want);
     }
 
     private async void SetParty(bool on, bool animate = true)
     {
         Log($"toggle {(on ? "on" : "off")} busy={Busy} held={_held}");
+#if PARTY_STRESS
+        _stressToggledAt = DateTime.UtcNow;
+        Log("  from: " + string.Join(" < ", new System.Diagnostics.StackTrace().GetFrames().Skip(1).Take(4).Select(f => f.GetMethod()?.Name)));
+#endif
         if (Busy || _held)
         {
             // He's mid-fall, mid-climb, mid-exit, or in your hand. The toggle still flips; the change waits its turn.
@@ -199,6 +206,8 @@ public sealed partial class MainWindow
         _sequence?.Cancel();
         _sequence = new CancellationTokenSource();
         _dancing = false;
+        _onGround = false;
+        _climbing = false;
         return _sequence.Token;
     }
 
@@ -214,11 +223,17 @@ public sealed partial class MainWindow
         return (float)Math.Max(FloorLeft(), InRoot(BarTrack).X + fill - BodyW);
     }
     private float GroundY() => (float)(Root.ActualHeight - BodyH);                       // feet on the very bottom edge of the window
-    private float DoorX() => (float)(InRoot(PartyToggle).X + 2);                          // the left edge of the toggle: the way in
     private float ExitDoorX() => (float)(InRoot(PartyToggle).X + PartyToggle.ActualWidth - 2);   // the right edge: the way out
     private float DoorY() => (float)(InRoot(PartyToggle).Y + PartyToggle.ActualHeight - BodyH + 2);
-    private float UnderDoorX() => DoorX() - BodyW / 2;                                       // the spot right under the door
-    private float HomeX() => Math.Clamp(UnderDoorX(), FloorLeft(), FloorRight());          // the closest he can stand to it
+    /// <summary>The knob's centre in the off position: the water he dives into.</summary>
+    private Vector2 KnobHome()
+    {
+        var t = InRoot(PartyToggle);
+        return new Vector2((float)t.X + 3 + 8, (float)(t.Y + PartyToggle.ActualHeight / 2));
+    }
+    /// <summary>The top of his ladder, his diving board: a little left of the knob, feet level with its lower half.</summary>
+    private float BoardX() => Math.Clamp(KnobHome().X - BodyW / 2 - 34, FloorLeft(), FloorRight());
+    private float BoardY() => KnobHome().Y + 5 - BodyH;
     /// <summary>Where he visibly is right now. Stops his body animations first, because a running animation's
     /// stored value is its target, not the frame on screen; stopping leaves the on-screen value behind.</summary>
     private Vector3 Freeze()
@@ -237,8 +252,24 @@ public sealed partial class MainWindow
         Body.Scale = Vector3.One;
         Body.Opacity = 1;
         Body.RotationAngleInDegrees = 0;
+        ResetFigure();
         _x = x;
         _facingLeft = false;
+    }
+
+    /// <summary>Undo anything a cancelled sequence can leave half-done on him: folded legs, a sad face, tears, a shrunken body.</summary>
+    private void ResetFigure()
+    {
+        var limbs = LimbVisuals();
+        foreach (var leg in new[] { limbs[2], limbs[3] }) { leg.StopAnimation("Scale"); leg.Scale = Vector3.One; }
+        foreach (var e in new UIElement[] { SadMouth, TearL, TearR })
+        {
+            var v = ElementCompositionPreview.GetElementVisual(e);
+            v.StopAnimation("Opacity");
+            v.Opacity = 0;
+        }
+        Body.Scale = Vector3.One;
+        Body.Opacity = 1;
     }
 
     /// <summary>He never turns round. He's symmetrical enough to walk either way, and it keeps his arms honest.</summary>
@@ -264,7 +295,7 @@ public sealed partial class MainWindow
         _grabOffset = _grabFrom;
         _grabAt = DateTime.UtcNow;
         Body.Properties.InsertVector3("Translation", new Vector3((float)(p.X - _grabOffset.X), (float)(p.Y - _grabOffset.Y), 0));
-        Body.Opacity = 1;
+        ResetFigure();   // grabbed mid-kneel, mid-cry or mid-dive: he's whole again in your hand
         StartSwing(p);                                        // position and tilt both move once per frame from here on
         HideLadder();
         if (!Settings.PartyMode) { Settings.PartyMode = true; SlideKnob(true, true); }   // grabbed mid-exit: he's out again
@@ -323,33 +354,103 @@ public sealed partial class MainWindow
     private async Task TumbleAsync(float x, CancellationToken ct)
     {
         Body.CenterPoint = new Vector3(BodyW / 2, BodyH, 0);
-        Log($"tumble from x={x:0} to ground y={GroundY():0}");
-        PassthroughFor(FloorStrip(), GroundStrip(), RectOf(x - 12, 0, BodyW + 24, Root.ActualHeight));   // the whole column he falls through
-        await FallTo(x, GroundY(), ct);
-        PassthroughFor(FloorStrip(), GroundStrip());
+        _onGround = true;
+        _groundAt = GroundY();
+        _groundTarget = FloorLeft() + (float)(Random.Shared.NextDouble() * (FloorRight() - FloorLeft()));
+        Log($"tumble from x={x:0} to ground y={_groundAt:0}");
+        PassthroughFor(FloorStrip(), GroundStrip(_groundAt), RectOf(x - 12, 0, BodyW + 24, Root.ActualHeight));   // the whole column he falls through
+        await FallTo(x, _groundAt, ct);
         _x = x;
-        float target = FloorLeft() + (float)(Random.Shared.NextDouble() * (FloorRight() - FloorLeft()));
-        Log($"walk to x={target:0} on ground y={GroundY():0}");
-        await WalkTo(target, GroundY(), ct);
-        Log($"climb from y={GroundY():0} to y={FloorY():0}");
-        PassthroughFor(FloorStrip(), GroundStrip(), LadderStrip(GroundY(), FloorY()));
-        await ClimbAsync(GroundY(), FloorY(), ct);
+        await GroundRouteAsync(ct);
+    }
+
+    /// <summary>On the ground: walk to the spot he picked under the charged part, ladder up to the bar, dance.</summary>
+    private async Task GroundRouteAsync(CancellationToken ct)
+    {
+        PassthroughFor(FloorStrip(), GroundStrip(_groundAt));
+        float target = Math.Clamp(_groundTarget, FloorLeft(), FloorRight());   // the charge may have shrunk since he picked it
+        Log($"walk to x={target:0} on ground y={_groundAt:0}");
+        await WalkTo(target, _groundAt, ct);
+        Log($"climb from y={_groundAt:0} to y={FloorY():0}");
+        PassthroughFor(FloorStrip(), GroundStrip(_groundAt), LadderStrip(_groundAt, FloorY()));
+        await ClimbAsync(_groundAt, FloorY(), ct);
         Log("on the bar, dancing");
         StartDancing();
     }
 
-    /// <summary>The window got shorter: if he's now below its bottom edge, he lands on the new ground and ladders back up.</summary>
-    private async void GroundMoved()
+    // ------------------------------------------------------------ the ground moves (graphs or stats opening and closing)
+
+    private bool _onGround;        // what he's doing is down at the bottom edge: falling to it, walking along it, laddering up from it
+    private float _groundAt;       // the ground that plan was made for
+    private float _groundTarget;   // where along it he was heading
+    private bool _climbing;        // on a ladder right now
+    private bool _edgeMoving;      // the window's bottom edge is mid-slide; the slide said where it will end
+
+    /// <summary>
+    /// The bottom edge is about to slide to a new height over <paramref name="ms"/>. If he's down there, he goes with it
+    /// from exactly where he is: lifted when the edge rises under him, falling when it drops away, his ladder made
+    /// longer or shorter if he's on one. Nothing about the old ground is kept, so no move ever ends in mid-air.
+    /// </summary>
+    private void EdgeWillMove(int toPx, int ms)
     {
-        await Task.Delay(200);   // after the shrink animation
-        var at = Where();
-        if (Dancer.Visibility != Visibility.Visible || _held || at.Y <= GroundY() + 1) return;
-        Log($"ground moved: he was at y={at.Y:0}, ground is now {GroundY():0}");
+        _edgeMoving = true;
+        float ground = (float)(GroundY() + (toPx - _heightPx) * 96.0 / GetDpiForWindow(Hwnd));   // relative: the edge moves by what the height changes by
+        if (_onGround && Out && !_held && Math.Abs(ground - _groundAt) > 0.5f) Replan(ground, ms);
+    }
+
+    private void EdgeSettled()
+    {
+        _edgeMoving = false;
+        GroundCheck();
+    }
+
+    /// <summary>Any other resize (a DPI change, an instant one at launch): if his ground is no longer the window's, catch up.</summary>
+    private void GroundCheck()
+    {
+        if (_edgeMoving || !_onGround || !Out || _held) return;
+        if (Math.Abs(GroundY() - _groundAt) > 1) Replan(GroundY(), 0);
+    }
+
+    private async void Replan(float ground, int ms)
+    {
+        bool climbing = _climbing && Ladder.Visibility == Visibility.Visible;
+        float target = _groundTarget;
+        Log($"ground moves {_groundAt:0} -> {ground:0} ({(climbing ? "on the ladder" : "on the ground")})");
         var ct = Begin();
-        try { Body.Properties.InsertVector3("Translation", new Vector3(at.X, GroundY() - 40, 0)); await TumbleAsync(at.X, ct); }
+        try
+        {
+            _onGround = true;
+            _groundAt = ground;
+            _groundTarget = target;
+            var at = Freeze();
+            _x = at.X;
+            int lift = Math.Max(ms, 140);
+            if (climbing)
+            {
+                float from = at.Y;
+                if (from > ground) { await Lift(ground, lift, ct); from = ground; }   // the edge came up past his feet: it carries him up the ladder
+                PassthroughFor(FloorStrip(), GroundStrip(ground), LadderStrip(ground, FloorY()));
+                await ClimbAsync(ground, FloorY(), ct, from);                          // same ladder, new bottom, carries on from his rung
+                StartDancing();
+                return;
+            }
+            Body.CenterPoint = new Vector3(BodyW / 2, BodyH, 0);
+            PassthroughFor(FloorStrip(), GroundStrip(ground), RectOf(at.X - 12, 0, BodyW + 24, Math.Max(ground, at.Y) + BodyH + 4));
+            if (at.Y > ground + 0.5f) await Lift(ground, lift, ct);    // rising edge: it picks him up
+            else if (at.Y < ground - 1) await FallTo(at.X, ground, ct); // falling edge (or mid-fall): down to where it is now
+            await GroundRouteAsync(ct);
+        }
         catch (OperationCanceledException) { }
         catch (Exception ex) { Recover(ex); }
         finally { Done(ct); }
+    }
+
+    /// <summary>Carried up by the rising edge, in step with it, straightening up on the way.</summary>
+    private async Task Lift(float y, int ms, CancellationToken ct)
+    {
+        _ = Limbs(ms, 50, -50, 20, -20);
+        await Play(ms, (Body, "Translation.Y", Scalar(Enter, (1, y))), (Body, "RotationAngleInDegrees", Scalar(Smooth, (1, 0))));
+        ct.ThrowIfCancellationRequested();
     }
 
     /// <summary>Called every reading: if the charge shrank out from under him, he falls off the end.</summary>
@@ -441,78 +542,67 @@ public sealed partial class MainWindow
     private async Task ExitCoreAsync(CancellationToken ct)
     {
         StandStill();
-        float underDoor = UnderDoorX(), homeX = HomeX(), floorY = FloorY(), doorY = DoorY();
-
-        await WalkTo(homeX, floorY, ct);
+        float boardX = BoardX(), floorY = FloorY(), boardY = BoardY();
+        await WalkTo(boardX, floorY, ct);
         Face(false);
-        await ClimbAsync(floorY, doorY, ct);
-
-        // The charged bar may end short of the door. Then the ladder stands at its end, and he leaps the rest.
-        float gap = underDoor - homeX;
-        if (gap > 3)
-        {
-            await LeapAsync(gap, doorY, ct);
-            homeX = underDoor;
-        }
-
-        // through the door: slides right into the toggle and shrinks away; the ladder, no longer held, drops out of the window
-        _ = Limbs(200, 40, -40, 10, -10);
-        var drop = DropLadder();
-        await Play(200,
-            (Body, "Translation.X", Scalar(Exit, (1, homeX + 14))),
-            (Body, "Scale", Vec(Exit, (1, new Vector3(0.5f, 0.5f, 1)))),
-            (Body, "Opacity", Scalar(Exit, (0.5f, 1), (1, 0))));
-        ct.ThrowIfCancellationRequested();
+        await ClimbAsync(floorY, boardY, ct);
+        await DiveAsync(ct);
         Dancer.Visibility = Visibility.Collapsed;
         PassthroughFor();
-        await drop;
     }
 
     /// <summary>
-    /// A standing leap across a gap at door height: the longer the gap, the longer he winds up and braces,
-    /// the higher the arc, and the harder the landing.
+    /// Off the top of the ladder and head-first into the knob, like a dive into a pool: a look, a wind-up, a spring
+    /// with the arms sweeping overhead, an arc that turns him head-down, and he slips into it without a ripple.
+    /// The further the ladder had to stand from the toggle, the bigger the wind-up and the higher the arc.
     /// </summary>
-    private async Task LeapAsync(float gap, float y, CancellationToken ct)
+    private async Task DiveAsync(CancellationToken ct)
     {
-        float startX = _x, endX = _x + gap;
-        int windMs = (int)Math.Clamp(300 + gap * 9, 300, 1800);   // 100 px gap: 1.2 s of getting ready
-        int jumpMs = (int)Math.Clamp(320 + gap * 2.2, 320, 760);
-        float peak = Math.Clamp(8 + gap * 0.18f, 8, 34);
+        var knob = KnobHome();
+        var at = Where();
+        // Pivot about his middle for the flight so he turns about it. Upright and full-size, moving the pivot moves nothing on screen.
+        Body.RotationAngleInDegrees = 0;
+        Body.Scale = Vector3.One;
+        Body.CenterPoint = new Vector3(BodyW / 2, BodyH / 2, 0);
+        float startX = at.X, startY = at.Y;
+        float endX = knob.X - BodyW / 2, endY = knob.Y - BodyH / 2;   // his middle on the knob's middle
+        float dx = Math.Max(0, endX - startX);
+        float peak = Math.Min(startY, endY) - Math.Clamp(12 + dx * 0.08f, 12, 30);
 
-        // measure it up, then wind up: crouch lower and lean back the longer he waits
-        _ = Limbs(220, 60, -60, 12, -12);
-        await Play(220, (Body, "RotationAngleInDegrees", Scalar(Smooth, (1, 6))));
-        ct.ThrowIfCancellationRequested();
-        _ = Limbs(windMs, -70, 70, 45, -45);                       // arms swing back, knees bend deep
+        // 1. toes to the edge, a look down at the water
+        _ = Limbs(240, 70, -70, 6, -6);
+        await Play(240, (Body, "RotationAngleInDegrees", Scalar(Smooth, (1, 8))));
+        await Task.Delay(160, ct);
+
+        // 2. the wind-up: knees bend, arms swing back, a lean back
+        int windMs = (int)Math.Clamp(260 + dx * 2, 260, 600);
+        _ = Limbs(windMs, -60, 60, 36, -36);
         await Play(windMs,
-            (Body, "Translation.Y", Scalar(Smooth, (1, y + 4))),
-            (Body, "RotationAngleInDegrees", Scalar(Smooth, (1, -14))),
-            (Body, "Translation.X", Scalar(Smooth, (1, startX - Math.Min(10, gap * 0.12f)))));
+            (Body, "Translation.Y", Scalar(Smooth, (1, startY + 3))),
+            (Body, "RotationAngleInDegrees", Scalar(Smooth, (1, -8))));
         ct.ThrowIfCancellationRequested();
-        await Task.Delay((int)(gap * 3), ct);                       // the brace: a held beat before the spring
 
-        // the spring and the flight: stretch, arms and legs out, arc over, tuck for the landing
-        _ = Limbs(jumpMs, 160, -160, 45, -35);
-        await Play(jumpMs,
+        // 3. the spring: arms sweep overhead together, legs snap straight and together; the ladder, let go of, falls away
+        var drop = DropLadder();
+        int flyMs = (int)Math.Clamp(440 + dx * 2.2f, 440, 820);
+        _ = Limbs(170, 176, -176, 3, -3);
+        var y = Compositor.CreateScalarKeyFrameAnimation();
+        y.InsertKeyFrame(0.42f, peak, Enter);       // rising, slowing to the top
+        y.InsertKeyFrame(1f, endY, Accelerate);     // then dropping, faster and faster
+        await Play(flyMs,
             (Body, "Translation.X", Scalar(Linear, (1, endX))),
-            (Body, "Translation.Y", Scalar(Enter, (0.45f, y - peak))),
-            (Body, "RotationAngleInDegrees", Scalar(Smooth, (0.4f, 12), (1, -6))));
-        ct.ThrowIfCancellationRequested();
-        var fall = Compositor.CreateScalarKeyFrameAnimation();
-        fall.InsertKeyFrame(1f, y, Accelerate);
-        fall.Duration = TimeSpan.FromMilliseconds(jumpMs * 0.55);
-        await Play((int)(jumpMs * 0.55), (Body, "Translation.Y", fall));
+            (Body, "Translation.Y", y),
+            (Body, "RotationAngleInDegrees", Scalar(Smooth, (0.42f, 90), (1, 160))),   // flat at the top of the arc, head-down at the end
+            (Body, "Scale", Vec(Accelerate, (0.7f, Vector3.One), (1, new Vector3(0.3f, 0.3f, 1)))),
+            (Body, "Opacity", Scalar(Linear, (0.82f, 1), (1, 0))));
         ct.ThrowIfCancellationRequested();
 
-        // the landing: the bigger the jump, the deeper the knees go, then he stands up
-        float dip = Math.Clamp(2 + gap * 0.03f, 2, 6);
-        _ = Limbs(100, 80, -80, 50, -50);
-        await Play(100, (Body, "Translation.Y", Scalar(Smooth, (1, y + dip))), (Body, "RotationAngleInDegrees", Scalar(Smooth, (1, 8))));
-        _ = Limbs(220, 40, -40, 20, -20);
-        await Play(220, (Body, "Translation.Y", Scalar(Smooth, (1, y))), (Body, "RotationAngleInDegrees", Scalar(Smooth, (1, 0))));
-        _x = endX;
-        _ = DropLadder();
-        await Limbs(120, 20, -20, 10, -10);
+        // 4. in: he's gone into the knob, and the ladder, let go of, finishes falling
+        Dancer.Visibility = Visibility.Collapsed;
+        Body.CenterPoint = new Vector3(BodyW / 2, BodyH, 0);
+        Body.RotationAngleInDegrees = 0;
+        Body.Scale = Vector3.One;
+        await drop;
     }
 
     /// <summary>Stop mid-move and stand still where he is.</summary>
@@ -547,24 +637,33 @@ public sealed partial class MainWindow
         _x = x;
     }
 
-    /// <summary>A ladder grows from his feet up to the higher floor; he climbs it hand over hand.</summary>
-    private async Task ClimbAsync(float fromY, float toY, CancellationToken ct)
+    /// <summary>
+    /// A ladder grows from his feet up to the higher floor; he climbs it hand over hand. Given <paramref name="from"/>, he's
+    /// already on it at that height: the ladder is redrawn to the new bottom without growing again, and he climbs on from there.
+    /// </summary>
+    private async Task ClimbAsync(float fromY, float toY, CancellationToken ct, float? from = null)
     {
+        _climbing = true;
         float top = toY + BodyH - 3, bottom = fromY + BodyH;
         Ladder.Data = LadderPath(_x + 5, _x + BodyW - 5, top, bottom);
         var ladder = ElementCompositionPreview.GetElementVisual(Ladder);
-        ladder.StopAnimation("Translation.Y"); ladder.StopAnimation("RotationAngleInDegrees");
+        ladder.StopAnimation("Translation.Y"); ladder.StopAnimation("RotationAngleInDegrees"); ladder.StopAnimation("Scale");
         ladder.Properties.InsertVector3("Translation", Vector3.Zero);
         ladder.RotationAngleInDegrees = 0;
         ladder.CenterPoint = new Vector3(_x + BodyW / 2, bottom, 0);
-        ladder.Scale = new Vector3(1, 0, 1);
         ladder.Opacity = 1;
         Ladder.Visibility = Visibility.Visible;
-        _ = Limbs(180, 150, -20, 10, -10);   // reaches up for the first rung while it grows
-        await Play(180, (ladder, "Scale", Vec(Enter, (1, Vector3.One))));
-        ct.ThrowIfCancellationRequested();
+        if (from is null)
+        {
+            ladder.Scale = new Vector3(1, 0, 1);
+            _ = Limbs(180, 150, -20, 10, -10);   // reaches up for the first rung while it grows
+            await Play(180, (ladder, "Scale", Vec(Enter, (1, Vector3.One))));
+            ct.ThrowIfCancellationRequested();
+        }
+        else ladder.Scale = Vector3.One;
 
-        int rungs = Math.Max(3, (int)((bottom - top) / 9));
+        float startY = from ?? fromY;
+        int rungs = Math.Max(from is null ? 3 : 1, (int)Math.Round((startY - toY) / 9));
         int rungMs = 150;
         var climb = Play(rungs * rungMs, (Body, "Translation.Y", Scalar(Linear, (1, toY))));
         for (int i = 0; i < rungs; i++)
@@ -764,7 +863,7 @@ public sealed partial class MainWindow
         UpdateRegions();
     }
     private RectInt32 FloorStrip() => RectOf(FloorLeft(), FloorY() - 30, BarTrack.ActualWidth, BodyH + 32);
-    private RectInt32 GroundStrip() => RectOf(0, GroundY() - 30, Root.ActualWidth, BodyH + 30);
+    private RectInt32 GroundStrip(float ground) => RectOf(0, ground - 30, Root.ActualWidth, BodyH + 30);
     private RectInt32 LadderStrip(float fromY, float toY) => RectOf(_x - 12, Math.Min(fromY, toY) - 4, BodyW + 24, Math.Abs(fromY - toY) + BodyH + 8);
 
     private void StartDancing()
@@ -786,11 +885,31 @@ public sealed partial class MainWindow
     private async Task DanceLoopAsync(CancellationToken ct)
     {
         var rng = Random.Shared;
-        Func<CancellationToken, Task>[] routines = [Groove, Moonwalk, Robot, JumpingJacks, Twist, RunningMan, Moonwalk, Shimmy, Bow, Groove, Moonwalk, Groove];
+        // Everyday moves come up often, showpieces now and then; never the same move twice within three.
+        (Func<CancellationToken, Task> Move, int Weight)[] moves =
+        [
+            (Groove, 4), (Moonwalk, 3), (Robot, 2), (JumpingJacks, 1), (Twist, 2), (RunningMan, 2), (Shimmy, 2), (Bow, 1),
+            (Floss, 2), (Sprinkler, 2), (Disco, 2), (Spin, 2), (CanCan, 1), (RaiseTheRoof, 2), (Sway, 2), (Splits, 1),
+            (ClapHop, 2), (Grapevine, 2), (Dab, 1),
+        ];
+        int total = moves.Sum(m => m.Weight);
+        int last = -1, before = -1;
         try
         {
             while (!ct.IsCancellationRequested)
-                await routines[rng.Next(routines.Length)](ct);
+            {
+                int pick;
+                do
+                {
+                    int r = rng.Next(total);
+                    pick = 0;
+                    while (r >= moves[pick].Weight) { r -= moves[pick].Weight; pick++; }
+                }
+                while (pick == last || pick == before);
+                before = last;
+                last = pick;
+                await moves[pick].Move(ct);
+            }
         }
         catch (OperationCanceledException) { }
         catch (Exception ex) { Recover(ex); }
@@ -915,6 +1034,199 @@ public sealed partial class MainWindow
         await Task.Delay(260, ct);
         _ = Limbs(320, 40, -40, 18, -18);
         await Play(320, (Body, "RotationAngleInDegrees", Scalar(Smooth, (1, 0))));
+    }
+
+    // Angles, for reading the moves: an arm or leg at 0 hangs straight down. The left limb's positive angles swing it out
+    // to the left and up (90 is straight out, 180 straight up); the right limb's negative angles do the same on the right.
+
+    /// <summary>The floss: both arms swing to one side while the hips swing to the other, fast, back and forth.</summary>
+    private async Task Floss(CancellationToken ct)
+    {
+        float floorY = FloorY(), x = _x;
+        for (int i = 0; i < 10; i++)
+        {
+            ct.ThrowIfCancellationRequested();
+            bool left = i % 2 == 0;
+            float hips = (float)Math.Clamp(x + (left ? 2 : -2), FloorLeft(), FloorRight());
+            _ = Limbs(160, left ? 55 : -25, left ? 25 : -55, left ? -8 : 8, left ? -8 : 8);
+            await Play(160,
+                (Body, "Translation.X", Scalar(Smooth, (1, hips))),
+                (Body, "Translation.Y", Scalar(Smooth, (0.5f, floorY + 1), (1, floorY))),
+                (Body, "RotationAngleInDegrees", Scalar(Smooth, (1, left ? 5 : -5))));
+        }
+        _ = Limbs(200, 35, -35, 18, -18);
+        await Play(200, (Body, "Translation.X", Scalar(Smooth, (1, x))), (Body, "RotationAngleInDegrees", Scalar(Smooth, (1, 0))));
+        _x = x;
+    }
+
+    /// <summary>The sprinkler: one hand behind the head, the other arm out, ticking round in little jerks, then a sweep back.</summary>
+    private async Task Sprinkler(CancellationToken ct)
+    {
+        float floorY = FloorY();
+        for (int round = 0; round < 2; round++)
+        {
+            _ = Limbs(160, 165, -90, 14, -14, jerky: true);
+            for (int i = 1; i <= 4; i++)
+            {
+                ct.ThrowIfCancellationRequested();
+                await Play(70,
+                    (Body, "RotationAngleInDegrees", Scalar(Linear, (1, -4f * i))),
+                    (Body, "Translation.Y", Scalar(Linear, (0.5f, floorY - 2), (1, floorY))));
+                await Task.Delay(90, ct);
+            }
+            _ = Limbs(360, 165, -70, 14, -14);
+            await Play(360, (Body, "RotationAngleInDegrees", Scalar(Smooth, (1, 6))));
+        }
+        _ = Limbs(220, 35, -35, 18, -18);
+        await Play(220, (Body, "RotationAngleInDegrees", Scalar(Smooth, (1, 0))));
+    }
+
+    /// <summary>Disco: one hand on the hip, the other points up to the corner, then down across the body, hips popping.</summary>
+    private async Task Disco(CancellationToken ct)
+    {
+        float floorY = FloorY();
+        for (int i = 0; i < 4; i++)
+        {
+            ct.ThrowIfCancellationRequested();
+            _ = Limbs(200, 20, -150, 10, -22);   // up
+            await Play(200, (Body, "RotationAngleInDegrees", Scalar(Smooth, (1, 6))), (Body, "Translation.Y", Scalar(Smooth, (1, floorY - 1))));
+            await Task.Delay(120, ct);
+            _ = Limbs(200, 20, 40, 22, -10);     // down and across
+            await Play(200, (Body, "RotationAngleInDegrees", Scalar(Smooth, (1, -5))), (Body, "Translation.Y", Scalar(Smooth, (1, floorY + 1))));
+            await Task.Delay(80, ct);
+        }
+        _ = Limbs(220, 35, -35, 18, -18);
+        await Play(220, (Body, "RotationAngleInDegrees", Scalar(Smooth, (1, 0))), (Body, "Translation.Y", Scalar(Smooth, (1, floorY))));
+    }
+
+    /// <summary>A spin on the spot: up on his toes, arms up, and he turns round twice (he narrows to edge-on and back).</summary>
+    private async Task Spin(CancellationToken ct)
+    {
+        float floorY = FloorY();
+        _ = Limbs(200, 165, -165, 4, -4);
+        await Play(200, (Body, "Translation.Y", Scalar(Smooth, (1, floorY - 2))));
+        for (int i = 0; i < 2; i++)
+        {
+            ct.ThrowIfCancellationRequested();
+            await Play(300, (Body, "Scale", Vec(Smooth, (0.5f, new Vector3(0.12f, 1, 1)), (1, Vector3.One))));
+        }
+        _ = Limbs(240, 90, -90, 22, -22);   // ta-da
+        await Play(240, (Body, "Translation.Y", Scalar(Smooth, (0.4f, floorY + 2), (1, floorY))));
+        await Task.Delay(220, ct);
+    }
+
+    /// <summary>The can-can: hands on hips, high kicks, left and right, a hop on every one.</summary>
+    private async Task CanCan(CancellationToken ct)
+    {
+        float floorY = FloorY();
+        for (int i = 0; i < 6; i++)
+        {
+            ct.ThrowIfCancellationRequested();
+            bool left = i % 2 == 0;
+            _ = Limbs(170, 25, -25, left ? 85 : -4, left ? 4 : -85);
+            await Play(170, (Body, "Translation.Y", Scalar(Smooth, (0.4f, floorY - 4), (1, floorY))), (Body, "RotationAngleInDegrees", Scalar(Smooth, (1, left ? 4 : -4))));
+            _ = Limbs(130, 25, -25, 10, -10);
+            await Task.Delay(130, ct);
+        }
+        _ = Limbs(200, 35, -35, 18, -18);
+        await Play(200, (Body, "RotationAngleInDegrees", Scalar(Smooth, (1, 0))));
+    }
+
+    /// <summary>Raise the roof: palms up, pushing at the ceiling on the beat, knees bouncing.</summary>
+    private async Task RaiseTheRoof(CancellationToken ct)
+    {
+        float floorY = FloorY();
+        for (int i = 0; i < 6; i++)
+        {
+            ct.ThrowIfCancellationRequested();
+            _ = Limbs(120, 176, -176, 14, -14, jerky: true);   // push
+            await Play(120, (Body, "Translation.Y", Scalar(Smooth, (1, floorY - 3))));
+            _ = Limbs(130, 135, -135, 26, -26);                // drop back
+            await Play(130, (Body, "Translation.Y", Scalar(Smooth, (1, floorY + 1))));
+        }
+        _ = Limbs(220, 35, -35, 18, -18);
+        await Play(220, (Body, "Translation.Y", Scalar(Smooth, (1, floorY))));
+    }
+
+    /// <summary>The concert sway: both arms up and waving, the whole body swaying slow and wide, side to side.</summary>
+    private async Task Sway(CancellationToken ct)
+    {
+        for (int i = 0; i < 5; i++)
+        {
+            ct.ThrowIfCancellationRequested();
+            bool left = i % 2 == 0;
+            _ = Limbs(520, left ? 170 : 150, left ? -150 : -170, 10, -10);
+            await Play(520, (Body, "RotationAngleInDegrees", Scalar(Smooth, (1, left ? -12 : 12))));
+        }
+        _ = Limbs(300, 35, -35, 18, -18);
+        await Play(300, (Body, "RotationAngleInDegrees", Scalar(Smooth, (1, 0))));
+    }
+
+    /// <summary>The splits: legs slide out flat, he drops onto the bar, arms up for the applause, then springs back up.</summary>
+    private async Task Splits(CancellationToken ct)
+    {
+        float floorY = FloorY();
+        // a leg is 11 px from hip to foot; out at 80 degrees the feet rise to just below the hips, so the body drops 9 px to keep them on the bar
+        _ = Limbs(360, 60, -60, 80, -80);
+        await Play(360, (Body, "Translation.Y", Scalar(Smooth, (1, floorY + 9))), (Body, "RotationAngleInDegrees", Scalar(Smooth, (1, 0))));
+        ct.ThrowIfCancellationRequested();
+        _ = Limbs(220, 170, -170, 80, -80);
+        await Task.Delay(620, ct);
+        _ = Limbs(260, 40, -40, 18, -18);
+        await Play(260, (Body, "Translation.Y", Scalar(Enter, (0.6f, floorY - 4), (1, floorY))));
+    }
+
+    /// <summary>Clap and hop: hop to the side with the arms open, clap overhead on landing.</summary>
+    private async Task ClapHop(CancellationToken ct)
+    {
+        float floorY = FloorY();
+        for (int i = 0; i < 4; i++)
+        {
+            ct.ThrowIfCancellationRequested();
+            float x = (float)Math.Clamp(_x + (i % 2 == 0 ? 8 : -8), FloorLeft(), FloorRight());
+            _ = Limbs(180, 115, -115, 26, -26);
+            await Play(180, (Body, "Translation.X", Scalar(Smooth, (1, x))), (Body, "Translation.Y", Scalar(Enter, (1, floorY - 8))));
+            _ = Limbs(130, 178, -178, 10, -10);   // clap
+            await Play(130, (Body, "Translation.Y", Scalar(Accelerate, (1, floorY))));
+            _x = x;
+            await Task.Delay(90, ct);
+        }
+        _ = Limbs(200, 35, -35, 18, -18);
+        await Task.Delay(200, ct);
+    }
+
+    /// <summary>The grapevine: travels sideways, the back foot crossing behind on every other step, arms swinging along.</summary>
+    private async Task Grapevine(CancellationToken ct)
+    {
+        float floorY = FloorY(), left = FloorLeft(), right = FloorRight();
+        float dir = _x - left > right - _x ? -1 : 1;   // towards the roomier side
+        for (int i = 0; i < 6; i++)
+        {
+            ct.ThrowIfCancellationRequested();
+            bool open = i % 2 == 0;
+            float x = (float)Math.Clamp(_x + dir * 9, left, right);
+            _ = Limbs(180, open ? 70 : 20, open ? -70 : -20, open ? 22 : -14, open ? -22 : 14);
+            await Play(180,
+                (Body, "Translation.X", Scalar(Smooth, (1, x))),
+                (Body, "Translation.Y", Scalar(Smooth, (0.5f, floorY - 2), (1, floorY))),
+                (Body, "RotationAngleInDegrees", Scalar(Smooth, (1, dir * (open ? 4 : 1)))));
+            _x = x;
+        }
+        _ = Limbs(160, 100, -100, 18, -18);   // a tap and a flourish
+        await Play(160, (Body, "RotationAngleInDegrees", Scalar(Smooth, (1, 0))));
+        _ = Limbs(220, 35, -35, 18, -18);
+        await Task.Delay(220, ct);
+    }
+
+    /// <summary>The dab: head ducks into one elbow, the other arm flung out high. Held a beat, then back.</summary>
+    private async Task Dab(CancellationToken ct)
+    {
+        bool left = Random.Shared.Next(2) == 0;
+        _ = Limbs(140, left ? 130 : -70, left ? 70 : -130, 14, -14, jerky: true);
+        await Play(140, (Body, "RotationAngleInDegrees", Scalar(Smooth, (1, left ? -12 : 12))));
+        await Task.Delay(520, ct);
+        _ = Limbs(260, 35, -35, 18, -18);
+        await Play(260, (Body, "RotationAngleInDegrees", Scalar(Smooth, (1, 0))));
     }
 
     // ------------------------------------------------------------ limbs (compositor rotations about the joints)

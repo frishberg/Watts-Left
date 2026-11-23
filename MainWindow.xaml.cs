@@ -31,7 +31,8 @@ public sealed partial class MainWindow : Window
     private readonly DispatcherQueueTimer _timer;
     private readonly HoverCards _cards;
     private readonly Queue<(DateTime At, double Watts)> _samples = new();
-    private readonly Queue<(DateTime At, double? Laptop, double? Charger)> _drawSamples = new();   // for the cards: what the last half minute looked like
+    private readonly Queue<(DateTime At, double? Laptop, double? Charger, double? Net)> _drawSamples = new();   // for the cards: what the last half minute looked like, all from the same readings
+    private bool? _drawOnAc;
     private Reading? _reading;
     private double _peakIn, _peakOut;
     private bool? _statsOnAc;
@@ -58,10 +59,10 @@ public sealed partial class MainWindow : Window
         presenter.IsResizable = false;
         presenter.IsMaximizable = false;
         presenter.IsMinimizable = true;
-        AppWindow.ResizeClient(new SizeInt32(Px(WidthDip), Px(DesignHeight)));
+        SetHeightPx(Px(DesignHeight));
         RoundCorners();
         AppWindow.TitleBar.ExtendsContentIntoTitleBar = true;
-        Root.SizeChanged += (_, _) => UpdateRegions();
+        Root.SizeChanged += (_, _) => { UpdateRegions(); GroundCheck(); };
         Root.Loaded += (_, _) => UpdateRegions();
         AppWindow.Changed += (_, e) =>
         {
@@ -83,6 +84,9 @@ public sealed partial class MainWindow : Window
         Clickable(GraphsToggle, () => SetGraphs(!Settings.ShowGraphs, animate: true));
         Clickable(StatsToggle, () => SetStats(!Settings.ShowStats));
         Root.Loaded += (_, _) => { SetParty(Settings.PartyMode, animate: false); SetStats(Settings.ShowStats, apply: false); SetGraphs(Settings.ShowGraphs, animate: false); };
+#if PARTY_STRESS
+        Root.Loaded += (_, _) => _ = PartyStressAsync();
+#endif
         CaptionButton(MinimizeButton, MinimizeDisc, () => ((OverlappedPresenter)AppWindow.Presenter).Minimize());
         CaptionButton(CloseButton, CloseDisc, HideFlyout);
 
@@ -312,12 +316,12 @@ public sealed partial class MainWindow : Window
     private static readonly TimeSpan HistorySpan = TimeSpan.FromMinutes(30);
     private readonly List<(DateTime At, double Percent, double Watts, double Volts, double Draw)> _history = new();
     private DateTime _lastSample = DateTime.MinValue;
+    private DateTime _historyTrimmedAt = DateTime.MinValue;   // MinValue: the first sample rewrites the file, shrinking whatever an older version left
     private static readonly string HistoryFile = Path.Combine(Settings.DataFolder, "history.csv");
 
     private async void SetGraphs(bool on, bool animate)
     {
         Settings.ShowGraphs = on;
-        if (!on && animate) DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, GroundMoved);
         SlideKnob(GraphsKnobSlide, GraphsPill, on, animate);
         var panel = ElementCompositionPreview.GetElementVisual(Graphs);
         ElementCompositionPreview.SetIsTranslationEnabled(Graphs, true);
@@ -326,7 +330,7 @@ public sealed partial class MainWindow : Window
         if (!animate)
         {
             Graphs.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
-                AppWindow.ResizeClient(new SizeInt32(Px(WidthDip), on ? open : closed));
+            SetHeightPx(on ? open : closed);
             if (on) DrawGraphs();
             return;
         }
@@ -348,26 +352,52 @@ public sealed partial class MainWindow : Window
             var shrink = SlideWindowHeight(open, closed, 150);
             await PlayOn(panel, 110, ("Opacity", 1f, 0f), ("Translation.Y", 0f, -10f));
             await shrink;
-            Graphs.Visibility = Visibility.Collapsed;
-            }
+            if (!Settings.ShowGraphs) Graphs.Visibility = Visibility.Collapsed;   // unless it was switched back on meanwhile
+            UpdateRegions();
+        }
     }
 
-    /// <summary>Move the window's bottom edge from one height to another, one step per rendered frame, eased.</summary>
+    // The height we last asked for. Not AppWindow.ClientSize: that reads back larger than what ResizeClient was given
+    // (29 DIP here), so starting a slide from it made the window jump before it moved.
+    private int _heightPx;
+    private void SetHeightPx(int px)
+    {
+        _heightPx = px;
+        AppWindow.ResizeClient(new SizeInt32(Px(WidthDip), px));
+    }
+
+    private Action? _cancelSlide;   // the slide in progress, if any: a new one takes over from it
+
+    /// <summary>
+    /// Move the window's bottom edge to a new height, one step per rendered frame, eased. Only one slide runs at a
+    /// time: toggling quickly starts the new slide from wherever the edge is now, so two never fight over the height.
+    /// The little guy is told where the edge will end up before it moves, so he can go with it.
+    /// </summary>
     private Task SlideWindowHeight(int fromPx, int toPx, int ms)
     {
+        _cancelSlide?.Invoke();
+        fromPx = _heightPx;   // where the edge really is, even mid-slide
         var done = new TaskCompletionSource();
         var start = DateTime.UtcNow;
+        void Stop()
+        {
+            Microsoft.UI.Xaml.Media.CompositionTarget.Rendering -= Frame;
+            if (_cancelSlide == Stop) _cancelSlide = null;
+            done.TrySetResult();
+        }
         void Frame(object? sender, object e)
         {
             double t = Math.Min(1, (DateTime.UtcNow - start).TotalMilliseconds / ms);
             double eased = 1 - Math.Pow(1 - t, 3);   // fast out, slow in
-            AppWindow.ResizeClient(new SizeInt32(Px(WidthDip), (int)Math.Round(fromPx + (toPx - fromPx) * eased)));
+            SetHeightPx((int)Math.Round(fromPx + (toPx - fromPx) * eased));
             if (t >= 1)
             {
-                Microsoft.UI.Xaml.Media.CompositionTarget.Rendering -= Frame;
-                done.TrySetResult();
+                Stop();
+                EdgeSettled();
             }
         }
+        _cancelSlide = Stop;
+        EdgeWillMove(toPx, ms);
         Microsoft.UI.Xaml.Media.CompositionTarget.Rendering += Frame;
         return done.Task;
     }
@@ -406,8 +436,11 @@ public sealed partial class MainWindow : Window
         try
         {
             File.AppendAllText(HistoryFile, string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{now:O},{r.Percent:0.0},{r.Watts ?? 0:0.00},{r.Volts ?? 0:0.000},{r.LaptopWatts ?? r.WattsOut:0.00}") + Environment.NewLine);
-            if (_history.Count % 360 == 0)   // every half hour: drop anything older than the graph window
+            if (now - _historyTrimmedAt > HistorySpan)   // every half hour: drop anything older than the graph window
+            {
+                _historyTrimmedAt = now;
                 File.WriteAllLines(HistoryFile, _history.Select(h => string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{h.At:O},{h.Percent:0.0},{h.Watts:0.00},{h.Volts:0.000},{h.Draw:0.00}")));
+            }
         }
         catch
         {
@@ -538,7 +571,7 @@ public sealed partial class MainWindow : Window
             return;
         }
         const int ms = 180;
-        int before = AppWindow.ClientSize.Height;
+        int before = _heightPx;
         if (on)
         {
             foreach (var line in lines) { ElementCompositionPreview.GetElementVisual(line).Opacity = 0; line.Height = 0; line.Visibility = Visibility.Visible; }
@@ -746,7 +779,8 @@ public sealed partial class MainWindow : Window
         if (r is not null && !stale)
         {
             var t = DateTime.UtcNow;
-            _drawSamples.Enqueue((t, r.LaptopWatts, r.OnAc ? r.ChargerWatts : 0));
+            if (_drawOnAc != r.OnAc) { _drawSamples.Clear(); _drawOnAc = r.OnAc; }   // the cards must not average across a plug change
+            _drawSamples.Enqueue((t, r.LaptopWatts, r.OnAc ? r.ChargerWatts : 0, r.Watts));
             while (_drawSamples.Count > 0 && (t - _drawSamples.Peek().At).TotalSeconds > AverageSeconds) _drawSamples.Dequeue();
         }
         if (!stale) RecordHistory(r);
@@ -848,6 +882,7 @@ public sealed partial class MainWindow : Window
 
     private double? AverageLaptop() { var v = _drawSamples.Where(s => s.Laptop is not null).Select(s => s.Laptop!.Value).ToList(); return v.Count == 0 ? null : v.Average(); }
     private double? AverageCharger() { var v = _drawSamples.Where(s => s.Charger is not null).Select(s => s.Charger!.Value).ToList(); return v.Count == 0 ? null : v.Average(); }
+    private double? AverageNet() { var v = _drawSamples.Where(s => s.Net is not null).Select(s => s.Net!.Value).ToList(); return v.Count == 0 ? null : v.Average(); }
 
     private double? Average(int seconds = AverageSeconds)
     {
@@ -918,6 +953,7 @@ public sealed partial class MainWindow : Window
     {
         WattsSource.Estimated => " This battery doesn't report it directly, so it's worked out from how fast the level moves.",
         WattsSource.Measuring => " This battery doesn't report it directly, so it's being measured. Give it a few minutes.",
+        WattsSource.Confirming => " This laptop's charging signal has been wrong before, so it waits until the battery's stored energy shows which way it's going.",
         WattsSource.Unavailable => " This battery can't report it.",
         _ => ""
     };
@@ -937,11 +973,12 @@ public sealed partial class MainWindow : Window
         const string what = "Energy coming in from the charger. ";
         if (r is null or { OnAc: false })
             return new("In", "0 W", [what + "None right now: nothing is plugged in."]);
-        if (AverageCharger() is { } charger && AverageLaptop() is { } laptop && Average() is { } net)
+        if (AverageCharger() is { } charger && AverageLaptop() is { } laptop && AverageNet() is { } net)
         {
             string split = net > 0.5 ? $"{About(laptop)} runs the laptop and {About(net)} fills the battery."
-                         : net < -0.5 ? $"not enough, so the battery is chipping in {About(net)}."
-                         : "all of it runs the laptop, since the battery is full.";
+                         : net < -0.5 ? $"all of it runs the laptop, and the battery is chipping in {About(net)} more."
+                         : r.Percent >= 99 ? "all of it runs the laptop, since the battery is full."
+                         : "all of it runs the laptop, and the battery is holding where it is.";
             return new("In", About(charger), [what + $"Lately {About(charger)}: {split}" + Rough(r)]);
         }
         return new("In", "—", [what + Learning(r)]);
@@ -966,11 +1003,12 @@ public sealed partial class MainWindow : Window
         const string what = "In minus out: what's left for the battery. ";
         if (r is null || r.Watts is null)
             return new("Net", "—", [what + "No reading right now." + SourceNote(r)]);
-        double? avg = Average();
+        double? avg = AverageNet();
         string now = !r.OnAc ? $"Nothing is coming in, so the battery is giving the laptop {About(avg)}."
                    : avg > 0.5 ? $"Lately {About(avg)} is going into the battery, so the charger is keeping up."
-                   : avg < -0.5 ? $"Lately {About(avg)} is coming out of the battery even with the charger in, so this charger isn't keeping up."
-                   : "Nothing in or out: the battery is full.";
+                   : avg < -0.5 ? $"Lately {About(avg)} is coming out of the battery even with the charger in: either the charger can't keep up with what the laptop is doing, or a battery-care setting is letting it run down to a set level."
+                   : r.Percent >= 99 ? "Nothing in or out: the battery is full."
+                   : "Nothing in or out: the battery is holding where it is, often a battery-care charge limit.";
         return new("Net", avg is { } a ? $"{a:0;-0;0} W" : "—", [what + now + SourceNote(r)]);
     }
 
@@ -1025,7 +1063,7 @@ public sealed partial class MainWindow : Window
     private int Px(int dip) => (int)Math.Round(dip * GetDpiForWindow(WinRT.Interop.WindowNative.GetWindowHandle(this)) / 96.0);
 
     private const int StatsLineDip = 18;
-    private int DesignHeight => HeightDip + (Graphs.Visibility == Visibility.Visible ? GraphsHeightDip + (Settings.ShowStats ? 4 * StatsLineDip : 0) : 0);
+    private int DesignHeight => HeightDip + (Settings.ShowGraphs ? GraphsHeightDip + (Settings.ShowStats ? 4 * StatsLineDip : 0) : 0);
 
     // ------------------------------------------------------------ drag by the title bar: Windows owns that strip as a caption
 

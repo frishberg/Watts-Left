@@ -41,6 +41,13 @@
     <Content Include="Assets\**\*.png;Assets\*.ico" />
   </ItemGroup>
 
+  <!-- The battery stress test is its own console program (run it with dotnet run in Tests\BatteryStress); keep it out of the app. -->
+  <ItemGroup>
+    <Compile Remove="Tests\**" />
+    <None Remove="Tests\**" />
+    <Content Remove="Tests\**" />
+  </ItemGroup>
+
   <ItemGroup>
     <Manifest Include="$(ApplicationManifest)" />
   </ItemGroup>

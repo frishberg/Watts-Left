@@ -45,6 +45,12 @@ public sealed class RateEstimator
         var last = _edges[^1];
         var span = last.At - first.At;
         PerHour = span < MinSpan ? null : (last.Level - first.Level) / span.TotalHours;
+        // The level hasn't moved since the last step, so it can't be moving faster than one step over that time: after
+        // a heavy load stops, the old slope would otherwise hang on for up to fifteen minutes.
+        double step = Math.Abs(last.Level - _edges[^2].Level);
+        double sinceLast = (now - last.At).TotalHours;
+        if (PerHour is { } p && sinceLast > 0 && step / sinceLast < Math.Abs(p))
+            PerHour = Math.Sign(p) * step / sinceLast;
     }
 
     /// <summary>Plugged in or unplugged: the old slope belongs to the old state.</summary>

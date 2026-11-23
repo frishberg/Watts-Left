@@ -20,7 +20,7 @@ public sealed class DrawModel
     private const double CpuSmoothingSeconds = 3;       // the meter is spiky; the estimate should read steady but follow real changes
     private const double OverheadSmoothingSeconds = 120;   // the overhead moves slowly (brightness, radios), so smooth it slowly
     private const double NeededSeconds = 120;            // this much battery time before the overhead is fully trusted
-    private const double SettleSeconds = 20;             // after a plug or unplug, the battery rate takes a moment to mean anything
+    private const double SettleSeconds = 60;             // after a plug or unplug, the battery averages its rate over up to a minute, so it means little before that
     private const double TypicalOverhead = 6;            // screen, drive, radios and fans on a typical laptop: the guess until this one is learned
     private const double TypicalPlatformOverhead = 1;    // the same guess when the meter already covers the whole platform (Intel's Psys)
     private const double MinOverhead = -1.5, MaxOverhead = 40;   // outside this the meter and the battery disagree so badly that one of them is wrong

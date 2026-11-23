@@ -19,7 +19,7 @@ public static class Display
     /// </summary>
     public static Top TopRow(Reading r)
     {
-        string? noRate = r.Watts is not null ? null : r.Source == WattsSource.Measuring ? "measuring…" : "not reported";
+        string? noRate = r.Watts is not null ? null : r.Source switch { WattsSource.Measuring => "measuring…", WattsSource.Confirming => "confirming…", _ => "not reported" };
         string? noMeter = !r.OnAc || r.LaptopWatts is not null ? null : r.Draw == DrawState.Unavailable ? "not available" : "estimating…";
         string estTag = r.Source == WattsSource.Estimated ? "est. " : "";
         // Just plugged in or unplugged, the battery can still report the old direction for a moment; the numbers
@@ -45,18 +45,39 @@ public static class Display
     public static string StateLine(Reading r, string hours) =>
         r.Charging ? $"Charging · full in {hours}"
         : r.Draining ? $"Plugged in · draining · {hours} left"
-        : r.JustPlugged ? "Plugged in"
+        : r.JustPlugged || r is { OnAc: true, Source: WattsSource.Confirming } ? "Plugged in"
         : r.OnAc ? (r.Percent >= 99 ? "Plugged in · full" : r.ChargerTooWeak ? "Plugged in · weak charger" : "Plugged in · holding")
         : $"On battery · {hours} left";
 
-    /// <summary>The tray icon's tooltip.</summary>
+    /// <summary>
+    /// The tray icon's tooltip, in short lines you can take in at a glance:
+    ///   76% · Charging
+    ///   Full in 24m
+    ///   In 38.5 W · Out 9.8 W · Net +28.7 W
+    /// The watts line only has what is known (on battery just Out, since Net would only repeat it).
+    /// </summary>
     public static string Tip(Reading r, string state)
     {
+        // the state line is "Charging · full in 24m": the status first, the time (if any) as its own line
+        string status = state, time = "";
+        int cut = state.LastIndexOf(" · ", StringComparison.Ordinal);
+        if (cut > 0 && (state.EndsWith(" left", StringComparison.Ordinal) || state.Contains("full in", StringComparison.Ordinal)))
+        {
+            status = state[..cut];
+            time = state[(cut + 3)..];
+            time = char.ToUpperInvariant(time[0]) + time[1..];
+        }
+        var lines = new List<string> { $"{r.Percent:0}% · {status}" };
+        if (time.Length > 0) lines.Add(time);
+
         var top = TopRow(r);
-        string tip = $"{r.Percent:0}% · {state.ToLowerInvariant()}";
-        if (r.OnAc && top.InLit) tip += $" · in {top.In}";
-        if (top.OutLit) tip += $" · out {top.Out}";
-        if (top.NetLit) tip += $" · net {top.Net}";
+        var watts = new List<string>();
+        if (r.OnAc && top.InLit) watts.Add($"In {top.In}");
+        if (top.OutLit) watts.Add($"Out {top.Out}");
+        if (r.OnAc && top.NetLit) watts.Add($"Net {(top.Net.StartsWith('-') ? top.Net : "+" + top.Net)}");
+        if (watts.Count > 0) lines.Add(string.Join(" · ", watts));
+
+        string tip = string.Join("\n", lines);
         return tip.Length <= 127 ? tip : tip[..127];   // the tray truncates at 128 characters anyway; never hand it more
     }
 

@@ -6,6 +6,7 @@ public enum WattsSource
     Driver,        // the battery reported its rate
     Estimated,     // the battery reports no rate; worked out from how the level moves
     Measuring,     // same, but the level hasn't moved enough yet to say
+    Confirming,    // plugged in on a laptop whose "charging" flag has been caught wrong: waiting for the stored energy to say which way
     Unavailable    // this battery reports neither a rate nor a capacity in watt-hours
 }
 
@@ -110,6 +111,9 @@ public sealed class BatteryInterpreter
     private readonly RateEstimator _energySlope = new();
     private readonly RateEstimator _percentSlope = new();
     private readonly DrawModel _draw;
+    private readonly DirectionJudge _judge = new();
+    private int _sessionDirection;         // what the stored energy has confirmed since the charger went in: +1, -1, or 0 not yet
+    private bool _disagreedThisSession;    // the firmware said charging and the stored energy said otherwise, this time plugged in
     private bool? _onAc;
     private DateTime _plugChangedAt = DateTime.MinValue;
     private DateTime _firstReadAt = DateTime.MinValue;
@@ -157,18 +161,21 @@ public sealed class BatteryInterpreter
             _energySlope.Reset();
             _percentSlope.Reset();
             _negativeSince = null;
+            _judge.Restart();
+            _sessionDirection = 0;
+            _disagreedThisSession = false;
         }
 
         // What the battery says its rate is, if it says anything sensible.
         double? driver = status.RateMw != BatteryDriver.UnknownRate && !relative ? status.RateMw / 1000.0 : null;
         if (driver is not null && Math.Abs(driver.Value) > 500)
             driver = null; // some firmware reports garbage; better to say "unknown" than lie
-        // ACPI gives the rate as a magnitude and the driver is meant to add the sign from the state; a few
-        // firmwares get that backwards, so when the state is unambiguous, the state wins.
+        // A "discharging" flag is the firmware admitting the battery is losing charge, so a positive rate with it
+        // is a sign slip. The reverse is not trusted: some firmware says "charging" whenever a charger is in, even
+        // while the battery drains (see DirectionJudge), so a negative rate is never turned positive.
         if (driver is { } d && d != 0)
         {
             if (flagDischarging && !flagCharging && d > 0) driver = -d;
-            else if (flagCharging && !flagDischarging && d < 0) driver = -d;
             if (driver > 0) _rateSeenCharging = true; else _rateSeenDischarging = true;
         }
         // A flat zero while the battery says it's charging or discharging, from firmware that has never reported a
@@ -188,6 +195,9 @@ public sealed class BatteryInterpreter
         if (remaining is { } mwh) _energySlope.Feed(now, mwh);
         _percentSlope.Feed(now, percent);
 
+        // The referee: the stored energy, fed the size of the reported rate on every reading.
+        _judge.Feed(now, remaining, full, driver is { } dr && dr != 0 ? Math.Abs(dr) : null);
+
         double? watts;
         WattsSource source;
         if (!driverUseless) { watts = driver; source = WattsSource.Driver; }
@@ -195,14 +205,41 @@ public sealed class BatteryInterpreter
         else if (remaining is not null) { watts = null; source = WattsSource.Measuring; }
         else { watts = null; source = WattsSource.Unavailable; }
 
-        // at 100 the trickle isn't "charging"; without a rate, the flag is all there is
-        bool chargingNow = onAc && flagCharging && percent < 100 && (watts is > 0 || (watts is null && source != WattsSource.Driver));
+        // Plugged in, a positive rate is only the firmware's claim. The stored energy confirms it or overrules it.
+        if (onAc && source == WattsSource.Driver && watts is > 0 && watts is { } claimed)
+        {
+            if (_judge.Verdict != 0) _sessionDirection = _judge.Verdict;
+            if (_judge.Verdict < 0 && !_disagreedThisSession)
+            {
+                // caught: count it once per time plugged in; twice and this laptop's flag is never taken at its word again
+                _disagreedThisSession = true;
+                int times = (Settings.FlagWrongCount ?? 0) + 1;
+                Settings.FlagWrongCount = times;
+                if (times >= 2) Settings.FlagUnreliable = true;
+            }
+            if (_sessionDirection < 0)
+            {
+                // the battery is losing charge: the size is the reported rate's when the energy matched it, else the energy's own
+                bool fits = _judge.Verdict == 0 || _judge.RateMatched;
+                watts = fits ? -claimed : _judge.SlopeWatts;
+                if (!fits) source = WattsSource.Estimated;
+            }
+            else if (_sessionDirection == 0 && Settings.FlagUnreliable)
+            {
+                watts = null;                     // this laptop's "charging" has lied before: wait for the energy to say
+                source = WattsSource.Confirming;
+            }
+        }
+
+        // at 100 the trickle isn't "charging"; without a rate (HP-style firmware), the flag is all there is
+        bool chargingNow = onAc && flagCharging && percent < 100 && (watts is > 0 || (watts is null && source is WattsSource.Estimated or WattsSource.Measuring));
         if (chargingNow) _lastChargingAt = now;
 
         // Draining on the charger only once it has kept going down for a few seconds: right after plugging in, the
         // battery can still report the discharge it was doing a moment ago.
         if (onAc && watts is < 0) _negativeSince ??= now; else _negativeSince = null;
-        bool draining = onAc && _negativeSince is { } since && (now - since).TotalSeconds >= DrainingSeconds;
+        // (a drain the stored energy has already confirmed needs no such wait)
+        bool draining = onAc && watts is < 0 && (_sessionDirection < 0 || _negativeSince is { } since && (now - since).TotalSeconds >= DrainingSeconds);
         bool charging = chargingNow || (onAc && percent < 100 && !draining && (now - _lastChargingAt).TotalSeconds < ChargingHoldSeconds);
         bool recentPlug = _plugChangedAt != DateTime.MinValue && (now - _plugChangedAt).TotalSeconds < PlugSettleSeconds;
         bool justPlugged = onAc && !charging && !draining && recentPlug;
@@ -223,6 +260,7 @@ public sealed class BatteryInterpreter
         var sb = new System.Text.StringBuilder();
         if (_last is { } r)
             sb.AppendLine($"Shown: {r.Percent:0}% · {(r.Watts is { } w ? $"{w:+0.0;-0.0} W" : "— W")} ({r.Source}) · slope {_energySlope.PerHour?.ToString("0") ?? "none"} mWh/h · {_percentSlope.PerHour?.ToString("0.0") ?? "none"} %/h · rate seen {(_rateSeenCharging ? "charging " : "")}{(_rateSeenDischarging ? "discharging" : "")}");
+        sb.AppendLine($"Direction: {_judge.Describe()} · confirmed this time plugged in: {(_sessionDirection > 0 ? "charging" : _sessionDirection < 0 ? "draining" : "not yet")} · charging flag caught wrong {Settings.FlagWrongCount ?? 0}× {(Settings.FlagUnreliable ? "(not trusted)" : "")}");
         sb.AppendLine($"Draw model: {_draw.State} · cpu {_draw.CpuWatts?.ToString("0.0") ?? "—"} W · overhead {_draw.Overhead?.ToString("0.0") ?? "—"} W from {_draw.LearnedSeconds:0} s on battery · laptop {_draw.LaptopWatts?.ToString("0.0") ?? "—"} W · charger {_draw.ChargerWatts?.ToString("0.0") ?? "—"} W");
         return sb.ToString();
     }

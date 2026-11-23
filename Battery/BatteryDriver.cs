@@ -46,7 +46,7 @@ public static unsafe partial class BatteryDriver
             ulong capacity = 0, design = 0, full = 0;
             long rate = 0;
             bool anyCapacity = false, anyDesign = false, anyFull = false, anyRate = false;
-            bool someCapacityUnknown = false, someDesignUnknown = false, someFullUnknown = false;
+            bool someCapacityUnknown = false, someDesignUnknown = false, someFullUnknown = false, someRateUnknown = false;
 
             for (int i = _batteries.Count - 1; i >= 0; i--)
             {
@@ -70,7 +70,7 @@ public static unsafe partial class BatteryDriver
                 powerState |= status.PowerState;
                 capabilities |= info.Capabilities;
                 if (status.Capacity != UnknownCapacity) { capacity += status.Capacity; anyCapacity = true; } else someCapacityUnknown = true;
-                if (status.Rate != UnknownRate) { rate += status.Rate; anyRate = true; }
+                if (status.Rate != UnknownRate) { rate += status.Rate; anyRate = true; } else someRateUnknown = true;
                 if (voltage == UnknownVoltage) voltage = status.Voltage;
                 if (info.DesignMwh != UnknownCapacity) { design += info.DesignMwh; anyDesign = true; } else someDesignUnknown = true;
                 if (info.FullMwh != UnknownCapacity) { full += info.FullMwh; anyFull = true; } else someFullUnknown = true;
@@ -86,6 +86,7 @@ public static unsafe partial class BatteryDriver
             if (someCapacityUnknown) anyCapacity = false;
             if (someDesignUnknown) anyDesign = false;
             if (someFullUnknown) anyFull = false;
+            if (someRateUnknown) anyRate = false;
 
             return (new Status(powerState, anyCapacity ? (uint)Math.Min(capacity, uint.MaxValue - 1) : UnknownCapacity, voltage, anyRate ? (int)Math.Clamp(rate, int.MinValue + 1, int.MaxValue) : UnknownRate),
                     new Info(capabilities, anyDesign ? (uint)Math.Min(design, uint.MaxValue - 1) : UnknownCapacity, anyFull ? (uint)Math.Min(full, uint.MaxValue - 1) : UnknownCapacity, cycles));
